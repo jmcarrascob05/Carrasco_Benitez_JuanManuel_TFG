@@ -1,0 +1,144 @@
+services:
+  router:
+    image: alpine:3.20
+    container_name: prueba-rustyx-router
+    hostname: rustyx-router
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./init-firewall.sh:/init-firewall.sh:ro
+    command: ["/bin/sh", "/init-firewall.sh"]
+    networks:
+      dmz:
+        ipv4_address: 192.168.10.254
+      backend:
+        ipv4_address: 192.168.20.254
+      datos:
+        ipv4_address: 192.168.30.254
+    restart: unless-stopped
+
+  balanceador:
+    image: nginx:latest
+    container_name: prueba-rustyx-balanceador
+    hostname: rustyx-balanceador
+    volumes:
+      - ./balanceador/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8080:80"
+    networks:
+      dmz:
+        ipv4_address: 192.168.10.10
+      backend:
+        ipv4_address: 192.168.20.2
+    depends_on:
+      - web1
+      - web2
+      - router
+    restart: unless-stopped
+
+  web1:
+    build: ./web
+    container_name: prueba-rustyx-web1
+    hostname: rustyx-web1
+    volumes:
+      - ./web/rustyx:/var/www/rustyx:ro
+      - avatars_data:/var/www/rustyx/assets/avatars        # ← volumen compartido con permisos rw
+      - games_data:/var/www/rustyx/assets/games            # ← imágenes de juegos
+      - ./web/nginx-web.conf:/etc/nginx/nginx.conf:ro
+    # Dar permisos al directorio de uploads al arrancar
+    command: >
+      /bin/sh -c "
+      echo 'opcache.validate_timestamps=1' >> /etc/php/8.2/fpm/php.ini &&
+      echo 'opcache.revalidate_freq=0' >> /etc/php/8.2/fpm/php.ini &&
+      chmod 777 /var/www/rustyx/assets/avatars &&
+      chmod 777 /var/www/rustyx/assets/games &&
+      /start.sh
+      "
+    networks:
+      backend:
+        ipv4_address: 192.168.20.10
+      datos:
+        ipv4_address: 192.168.30.20
+    depends_on:
+      db:
+        condition: service_healthy
+      router:
+        condition: service_started
+    restart: unless-stopped
+
+  web2:
+    build: ./web
+    container_name: prueba-rustyx-web2
+    hostname: rustyx-web2
+    volumes:
+      - ./web/rustyx:/var/www/rustyx:ro
+      - avatars_data:/var/www/rustyx/assets/avatars        # ← mismo volumen compartido
+      - games_data:/var/www/rustyx/assets/games
+      - ./web/nginx-web.conf:/etc/nginx/nginx.conf:ro
+    command: >
+      /bin/sh -c "
+      echo 'opcache.validate_timestamps=1' >> /etc/php/8.2/fpm/php.ini &&
+      echo 'opcache.revalidate_freq=0' >> /etc/php/8.2/fpm/php.ini &&
+      chmod 777 /var/www/rustyx/assets/avatars &&
+      chmod 777 /var/www/rustyx/assets/games &&
+      /start.sh
+      "
+    networks:
+      backend:
+        ipv4_address: 192.168.20.11
+      datos:
+        ipv4_address: 192.168.30.21
+    depends_on:
+      db:
+        condition: service_healthy
+      router:
+        condition: service_started
+    restart: unless-stopped
+
+  db:
+    image: mariadb:latest
+    container_name: prueba-rustyx-db
+    hostname: rustyx-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: rustyxdb
+      MYSQL_USER: rustyxuser
+      MYSQL_PASSWORD: rustyxpass
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      datos:
+        ipv4_address: 192.168.30.10
+    # Healthcheck para que web1/web2 esperen a que la BD esté lista
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  dmz:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.10.0/24
+  backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.20.0/24
+  datos:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.30.0/24
+
+volumes:
+  mariadb_data:
+  avatars_data:    # volumen Docker gestionado → persiste entre reinicios y es rw por defecto
+  games_data:
